@@ -61,6 +61,16 @@ base_model = ChatOpenAI(
     base_url=ZHIPU_BASE_URL,
 )
 
+# 意图分类器模型单独创建模型，是因为我想限定返回的格式为JSON，这一点只用提示词是做不到的，一旦添加了response_format，
+# 那么模型调用的工具函数也必须是strict，因为分类意图的时候，不需要调用任何工具函数，又不想修改已有的工具函数，所以为意图分类单独创建新模型。
+classifier_model = ChatOpenAI(
+    model="glm-4-flash",
+    temperature=0,
+    api_key=ZHIPU_API_KEY,
+    base_url=ZHIPU_BASE_URL,
+    model_kwargs={"response_format": {"type": "json_object"}},
+)
+
 # 节点级别绑定工具（核心实践）
 weather_model = base_model.bind_tools([weather_lookup])
 news_model = base_model.bind_tools([news_lookup])
@@ -73,22 +83,26 @@ chat_model = base_model  # 普通闲聊节点不绑定工具
 def classify_intent(state: AgentState):
     """识别意图 + 提取城市，写入自定义状态字段"""
     messages = state["messages"]
-    user_text = messages[-1].content if messages else ""
 
     prompt = (
-        "你是一个意图分类器。"
-        "请严格返回 JSON，格式为："
-        '{"intent":"weather|news|other","city":"若无则空字符串"}。'
-        "其中，前面intent中的weather表示天气，news表示新闻，other表示其他。"
-        "不要输出任何额外文字。"
-    )
-    resp = base_model.invoke([SystemMessage(content=prompt), HumanMessage(content=str(user_text))])
+        "你是意图分类器。"
+        "只返回 JSON，不要任何额外文本。"
+        '输出字段: intent, city。'
+        'intent 必须且只能是 "weather" 或 "news" 或 "other" 其中之一。'
+        'city 是城市名；若无法确定，必须返回空字符串 ""。'
+        '意图和城市从最新的消息中提取，最后消息中提到的城市，如果有指代词，可以参考之前的消息，寻找答案'  # 这句话很重要，不要删掉，可以处理指代词的问题
+    )   
+
+    resp = classifier_model.invoke([SystemMessage(content=prompt)] + messages[-3:])  # 这里遇到指代词的话，还可以从最近3条消息中寻找答案
 
     intent = "other"
     city = ""
     try:
-        print(f"resp.content:{resp.content}")
-        data = json.loads(resp.content)
+        print(f"resp.content:{repr(resp.content)}")
+        raw_content = str(resp.content).strip()
+        content = raw_content.replace("```json\n", "").replace("\n```", "")
+        print(f"final.content:{repr(content)}")
+        data = json.loads(content)
         intent = data.get("intent", "other")
         city = data.get("city", "")
         if not city:
